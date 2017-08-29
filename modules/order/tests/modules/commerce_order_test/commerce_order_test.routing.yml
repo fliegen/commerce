@@ -7,3 +7,13 @@ commerce_order_test.profile_select_form:
     _access: 'TRUE'
   options:
     no_cache: TRUE
+commerce_order_test.multiple_profile_select_form:
+  path: '/commerce_order_test/multiple_profile_select_form'
+  defaults:
+    _form: '\Drupal\commerce_order_test\Form\MultipleProfileSelectTestForm'
+    _title: 'Multiple profile select test form'
+  requirements:
+    _access: 'TRUE'
+  options:
+    no_cache: TRUE
+

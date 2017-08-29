@@ -20,7 +20,6 @@ class ProfileSelectTestForm extends FormBase {
   public function buildForm(array $form, FormStateInterface $form_state) {
     $form['profile'] = [
       '#type' => 'commerce_profile_select',
-      '#title' => $this->t('Profile'),
       '#default_value' => NULL,
       '#profile_type' => 'customer',
       '#owner_uid' => \Drupal::currentUser()->id(),

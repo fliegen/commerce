@@ -55,6 +55,7 @@ class ProfileSelect extends FormElement {
       ],
       '#element_validate' => [
         [$class, 'validateElementSubmit'],
+        [$class, 'validateValueChanged'],
         [$class, 'validateForm'],
       ],
       '#commerce_element_submit' => [
@@ -125,7 +126,9 @@ class ProfileSelect extends FormElement {
 
         // If this is the first form build, set the element's value based on
         // the user's default profile.
-        if (!$form_state->isProcessingInput() && $existing_profile->isDefault()) {
+        if (!$form_state->isProcessingInput() &&
+          $existing_profile->isDefault() &&
+          $element['#value'] == '_new') {
           $element['#value'] = $existing_profile->id();
         }
       }
@@ -134,13 +137,13 @@ class ProfileSelect extends FormElement {
     $id_prefix = implode('-', $element['#parents']);
     $wrapper_id = Html::getUniqueId($id_prefix . '-ajax-wrapper');
     $element = [
-      '#tree' => TRUE,
-      '#prefix' => '<div id="' . $wrapper_id . '">',
-      '#suffix' => '</div>',
-      // Pass the id along to other methods.
-      '#wrapper_id' => $wrapper_id,
-      '#element_mode' => $form_state->get('element_mode') ?: 'view',
-    ] + $element;
+        '#tree' => TRUE,
+        '#prefix' => '<div id="' . $wrapper_id . '">',
+        '#suffix' => '</div>',
+        // Pass the id along to other methods.
+        '#wrapper_id' => $wrapper_id,
+        '#element_mode' => $form_state->get('element_mode-' . $id_prefix . '-edit_button') ?: 'view',
+      ] + $element;
 
     if (!empty($user_profiles)) {
       $element['profile_selection'] = [
@@ -180,7 +183,9 @@ class ProfileSelect extends FormElement {
     if (!$element_profile->isNew() && $element['#element_mode'] == 'view') {
       $view_builder = $entity_type_manager->getViewBuilder('profile');
       $element['rendered_profile'] = $view_builder->view($element_profile, 'default');
-
+      // Make the name of edit_button element unique in multiple elements form
+      $edit_button_name = (isset($element['#parents'])) ? implode('_', $element['#parents']) . '_' : '';
+      $edit_button_name .= 'edit_profile';
       $element['edit_button'] = [
         '#type' => 'submit',
         '#value' => t('Edit'),
@@ -190,7 +195,7 @@ class ProfileSelect extends FormElement {
           'wrapper' => $wrapper_id,
         ],
         '#submit' => [[get_called_class(), 'ajaxSubmit']],
-        '#name' => 'edit_profile',
+        '#name' => $edit_button_name,
         '#element_mode' => 'edit',
       ];
     }
@@ -215,6 +220,37 @@ class ProfileSelect extends FormElement {
     }
 
     return $element;
+  }
+
+  /**
+   * Validate whether the value of address field is changed or note.
+   * If the value of address field is changed, the profile_selection is _new for
+   * creating a new Profile entity.
+   *
+   * @param array $element
+   *   The form element.
+   * @param \Drupal\Core\Form\FormStateInterface $form_state
+   *   The current state of the form.
+   */
+  public static function validateValueChanged(array &$element, FormStateInterface $form_state) {
+    $value = $form_state->getValue($element['#parents']);
+
+    if ($value['profile_selection'] != '_new' &&
+      $element['#element_mode'] == 'edit') {
+      /** @var \Drupal\profile\ProfileStorageInterface $profile_storage */
+      $profile_storage = \Drupal::entityTypeManager()->getStorage('profile');
+      /** @var \Drupal\profile\Entity\Profile $element_profile */
+      $element_profile = $profile_storage->load($value['profile_selection']);
+
+      if ($element_profile->hasField('address')) {
+        $address = $element_profile->get('address')->getValue();
+        // Compare the input address and profile address to check if the address from input is changed
+        if (isset($value['address']) && !static::addressEquals($value['address'][0]['address'], $address[0])) {
+          $profile_selection_key = array_merge($element['#parents'], ['profile_selection']);
+          $form_state->setValue($profile_selection_key, '_new');
+        }
+      }
+    }
   }
 
   /**
@@ -253,6 +289,17 @@ class ProfileSelect extends FormElement {
     }
 
     $form_state->setValueForElement($element, $element_profile);
+
+    $triggering_element = $form_state->getTriggeringElement();
+    $element_parents = array_merge($element['#parents'], ['profile_selection']);
+    // Check if the triggering element is profile_selection element
+    if ($triggering_element['#parents'] === $element_parents && $element['#element_mode'] === 'edit') {
+      // Clear the input value
+      $input = &$form_state->getUserInput();
+      $address_parents = array_merge($element['#parents'], ['address', 0, 'address']);
+      NestedArray::unsetValue($input, $address_parents);
+      $form_state->setRebuild();
+    }
   }
 
   /**
@@ -264,12 +311,18 @@ class ProfileSelect extends FormElement {
    *   The current state of the form.
    */
   public static function submitForm(array &$element, FormStateInterface $form_state) {
+    /** @var \Drupal\profile\Entity\ProfileInterface $element_profile */
     $element_profile = $form_state->getValue($element['#parents']);
 
     if ($element['#element_mode'] != 'view' && $form_state->isSubmitted()) {
       $form_display = EntityFormDisplay::collectRenderDisplay($element_profile, 'default');
       $form_display->extractFormValues($element_profile, $element, $form_state);
-      $element_profile->save();
+      if ($element_profile->isNew()) {
+        $element_profile->save();
+      }
+
+      $element['#default_value'] = $element_profile;
+      $element['#value'] = $element_profile->id();
     }
 
     $form_state->setValueForElement($element, $element_profile);
@@ -289,8 +342,30 @@ class ProfileSelect extends FormElement {
    */
   public static function ajaxSubmit(array &$form, FormStateInterface $form_state) {
     $triggering_element = $form_state->getTriggeringElement();
-    $form_state->set('element_mode', $triggering_element['#element_mode']);
+    $parents = implode('-', $triggering_element['#parents']);
+    $element_mode_name = 'element_mode-' . $parents;
+
+    $form_state->set($element_mode_name, $triggering_element['#element_mode']);
     $form_state->setRebuild();
   }
 
+  /**
+   * Check if the address arrays are equal or not. In the equality comparition,
+   * empty string is regarded as the same with NULL.
+   *
+   * @param $address1
+   * @param $address2
+   * @return bool
+   */
+  public static function addressEquals($address1, $address2) {
+    $replace_empty_callable = function (&$value) {
+      if (empty($value)) {
+        $value = NULL;
+      }
+    };
+
+    array_walk($address1, $replace_empty_callable);
+    array_walk($address2, $replace_empty_callable);
+    return $address1 == $address2;
+  }
 }
